@@ -1,0 +1,92 @@
+name: Build L-DAW v8
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TE_REF: v3.2.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Tracktion Engine and JUCE (HTTPS)
+        shell: bash
+        run: |
+          set -e
+          git config --global advice.detachedHead false
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git clone --depth 1 --branch "$TE_REF" https://github.com/Tracktion/tracktion_engine.git external/tracktion_engine
+          cd external/tracktion_engine
+          JUCE_SHA=$(git ls-tree HEAD modules/juce | awk '{print $3}')
+          echo "Tracktion expects JUCE commit: $JUCE_SHA"
+          rm -rf modules/juce
+          curl -L --fail -o juce.zip "https://github.com/juce-framework/JUCE/archive/$JUCE_SHA.zip"
+          unzip -q juce.zip -d modules
+          mv "modules/JUCE-$JUCE_SHA" modules/juce
+          rm juce.zip
+          test -f modules/juce/CMakeLists.txt && echo "JUCE OK"
+
+      - name: Get Steinberg ASIO SDK
+        shell: pwsh
+        run: |
+          $urls = @(
+            "https://www.steinberg.net/asiosdk",
+            "https://download.steinberg.net/sdk_downloads/asiosdk_2.3.3_2019-06-14.zip"
+          )
+          foreach ($u in $urls) {
+            try {
+              Write-Host "Trying $u"
+              Invoke-WebRequest -Uri $u -OutFile asiosdk.zip -UseBasicParsing -MaximumRedirection 10
+              Expand-Archive asiosdk.zip -DestinationPath external/asiosdk -Force
+              $h = Get-ChildItem -Path external/asiosdk -Recurse -Filter iasiodrv.h | Select-Object -First 1
+              if ($h) {
+                $dir = $h.DirectoryName -replace '\\','/'
+                "ASIO_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+                Write-Host "ASIO SDK found in $dir"
+                break
+              }
+            } catch {
+              Write-Host "Could not use $u : $_"
+            }
+          }
+
+      - name: Check L-DAW source files
+        shell: bash
+        run: |
+          set -e
+          echo "=== L-DAW workflow v8 ==="
+          for f in Main.cpp MainComponent.cpp MainComponent.h ArrangeView.cpp ArrangeView.h MidiEditors.cpp MidiEditors.h \
+                   EngineUI.h Theme.h Effects.cpp Effects.h MixerView.cpp MixerView.h AudioTracks.cpp AudioTracks.h DawLook.h; do
+            [ -f "Source/$f" ] || { echo "ERROR: missing Source/$f - upload the complete L-DAW 0.5 package"; exit 1; }
+          done
+          [ -f installer/LDAW.iss ] || { echo "ERROR: missing installer/LDAW.iss"; exit 1; }
+          grep -q "MixerView.cpp" CMakeLists.txt || { echo "ERROR: CMakeLists.txt is an old version"; exit 1; }
+          echo "All files found (0.5)."
+
+      - name: Configure
+        shell: bash
+        run: cmake -B build -DASIO_INCLUDE_DIR="${ASIO_DIR:-}"
+
+      - name: Build app
+        shell: bash
+        run: cmake --build build --config Release --parallel
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = @("C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe") |
+                  Where-Object { Test-Path $_ } | Select-Object -First 1
+          & $iscc installer\LDAW.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: L-DAW-Windows
+          path: |
+            dist/*.exe
+            build/LDAW_artefacts/Release/L-DAW.exe
