@@ -1,18 +1,18 @@
 #pragma once
-// L-DAW 0.5
+// L-DAW 0.6
 #include <JuceHeader.h>
 #include "EngineUI.h"
 #include "Theme.h"
 #include "Effects.h"
+#include "Tools.h"
 #include "AudioTracks.h"
 #include "ArrangeView.h"
 #include "MidiEditors.h"
 #include "MixerView.h"
+#include "Inspector.h"
 
 using namespace ldaw;
 
-//==============================================================================
-// Track header: name, instrument / audio input, arm, mute, solo, automation, volume, pan
 //==============================================================================
 class TrackRow : public juce::Component
 {
@@ -45,6 +45,7 @@ private:
     juce::TextButton instrumentButton, editButton { "Edit" }, autoButton { "A" },
                      armButton { "R" }, muteButton { "M" }, soloButton { "S" };
     juce::Slider     volumeSlider, panSlider;
+    juce::String     outputText;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackRow)
 };
@@ -76,29 +77,38 @@ private:
 class DividerBar : public juce::Component
 {
 public:
-    DividerBar() { setMouseCursor (juce::MouseCursor::UpDownResizeCursor); }
+    explicit DividerBar (bool vertical = false) : isVertical (vertical)
+    {
+        setMouseCursor (vertical ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor);
+    }
 
-    std::function<void (int deltaY)> onDrag;
+    std::function<void (int delta)> onDrag;
 
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colour (0xff111214));
         g.setColour (juce::Colour (0xff4a4c52));
-        const int cx = getWidth() / 2;
+        const float cx = (float) getWidth() * 0.5f, cy = (float) getHeight() * 0.5f;
         for (int i = -2; i <= 2; ++i)
-            g.fillEllipse ((float) (cx + i * 8) - 1.5f, (float) getHeight() * 0.5f - 1.5f, 3.0f, 3.0f);
+        {
+            const float x = isVertical ? cx : cx + (float) (i * 8);
+            const float y = isVertical ? cy + (float) (i * 8) : cy;
+            g.fillEllipse (x - 1.5f, y - 1.5f, 3.0f, 3.0f);
+        }
     }
 
-    void mouseDown (const juce::MouseEvent& e) override { lastY = e.getScreenY(); }
+    void mouseDown (const juce::MouseEvent& e) override { last = isVertical ? e.getScreenX() : e.getScreenY(); }
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        const int dy = e.getScreenY() - lastY;
-        lastY = e.getScreenY();
-        if (dy != 0 && onDrag) onDrag (dy);
+        const int now = isVertical ? e.getScreenX() : e.getScreenY();
+        const int d = now - last;
+        last = now;
+        if (d != 0 && onDrag) onDrag (d);
     }
 
 private:
-    int lastY = 0;
+    bool isVertical;
+    int last = 0;
 };
 
 //==============================================================================
@@ -134,9 +144,10 @@ private:
 
     int  selectedTrack = 0;
     bool armed = false;
-    bool mixerDocked = false, mixerFull = false;
-    int  editorHeight = 320, mixerHeight = 360;
+    bool mixerDocked = false, mixerFull = false, inspectorShown = true;
+    int  editorHeight = 320, mixerHeight = 380, inspectorWidth = 250;
     int  tickCount = 0;
+    double loopStartBeat = 0.0, loopEndBeat = 16.0;
     te::EditItemID lastMidiTarget;
     juce::String laneSignature;
     std::map<juce::String, int> knownPointCounts;
@@ -144,13 +155,13 @@ private:
     juce::TooltipWindow tooltips { this, 700 };
 
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" },
-                     loopButton { "Loop" }, clickButton { "Click" },
+                     loopButton { "Loop" }, clickButton { "Click" }, countInButton { "Count-in" },
                      autoReadButton { "A.Read" }, autoWriteButton { "A.Write" },
                      addTrackButton { "+ Track" }, importButton { "Import audio" }, demoButton { "Quick start" },
                      audioButton { "Audio / MIDI" }, pluginsButton { "Plug-ins" },
-                     newButton { "New" }, openButton { "Open" }, saveButton { "Save" },
+                     newButton { "New" }, openButton { "Open" }, saveButton { "Save" }, exportButton { "Export" },
                      undoButton { "Undo" }, redoButton { "Redo" },
-                     mixerButton { "Mixer" }, fullMixerButton { "Full mixer" };
+                     mixerButton { "Mixer" }, fullMixerButton { "Full mixer" }, inspectorButton { "Inspector" };
     juce::Slider     tempoSlider;
     juce::ComboBox   loopLengthBox, zoomBox;
     juce::Label      tempoLabel { {}, "BPM" }, loopLabel { {}, "Loop" }, zoomLabel { {}, "View" },
@@ -159,7 +170,8 @@ private:
     TracksArea       tracksArea;
     MixerView        mixerView;
     MidiEditorPanel  editorPanel;
-    DividerBar       editorDivider, mixerDivider;
+    InspectorPanel   inspector;
+    DividerBar       editorDivider, mixerDivider, inspectorDivider { true };
     bool             editorOpen = false;
     std::unique_ptr<juce::FileChooser> chooser;
 
@@ -171,6 +183,7 @@ private:
     void rebuildTracks();
     juce::String makeLaneSignature();
     void selectTrack (int index);
+    void updateInspector();
     void routeInputs();
     te::AudioTrack* addTrack (bool audio);
     void showAddTrackMenu();
@@ -191,6 +204,7 @@ private:
     void showClipTempoDialog (te::EditItemID);
 
     void updateLoopRange();
+    void setLoopBeats (double startBeat, double endBeat);
     void togglePlay();
     void stopOrReturnToZero();
     void toggleRecord();

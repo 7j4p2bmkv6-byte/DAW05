@@ -1,0 +1,13 @@
+L-DAW 0.6 - changed and new files (upload over your 0.5 repository; all other files stay as they are)
+
+CMakeLists.txt              (changed - adds Tools.cpp + Inspector.cpp, version 0.6.0)
+installer/LDAW.iss          (changed - version 0.6.0)
+Source/Theme.h              (changed)
+Source/EngineUI.h           (changed - effects as rack devices)
+Source/ArrangeView.h/.cpp   (changed - markers)
+Source/MixerView.h/.cpp     (changed - buses, output routing)
+Source/MainComponent.h/.cpp (changed - export, inspector, count-in)
+Source/Tools.h/.cpp         (NEW - buses, export, count-in)
+Source/Inspector.h/.cpp     (NEW - inspector panel)
+
+Unchanged (keep): Main.cpp, DawLook.h, Effects.h/.cpp, AudioTracks.h/.cpp, MidiEditors.h/.cpp, .github/workflows/ydaw.yml

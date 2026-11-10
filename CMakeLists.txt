@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # Static MSVC runtime -> no Visual C++ redistributable needed on the target PC
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(LDAW VERSION 0.5.0 LANGUAGES C CXX)
+project(LDAW VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,7 +40,7 @@ juce_add_gui_app(LDAW
     PRODUCT_NAME "L-DAW"
     COMPANY_NAME "Landgren Audio"
     BUNDLE_ID com.landgrenaudio.ldaw
-    VERSION 0.5.0)
+    VERSION 0.6.0)
 
 juce_generate_juce_header(LDAW)
 
@@ -51,7 +51,9 @@ target_sources(LDAW PRIVATE
     Source/MidiEditors.cpp
     Source/Effects.cpp
     Source/MixerView.cpp
-    Source/AudioTracks.cpp)
+    Source/AudioTracks.cpp
+    Source/Tools.cpp
+    Source/Inspector.cpp)
 
 target_compile_definitions(LDAW PRIVATE
     JUCE_WEB_BROWSER=0

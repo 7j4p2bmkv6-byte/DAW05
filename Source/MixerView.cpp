@@ -7,7 +7,7 @@ namespace
     constexpr int stripWidth  = 96;
     constexpr int masterWidth = 150;
     constexpr int sideWidth   = 58;
-    constexpr int panelWidth  = 320;
+    constexpr int panelWidth  = 360;
     constexpr int labelBarH   = 15;
 
     const juce::Colour stripBg    { 0xff232428 };
@@ -232,9 +232,9 @@ bool MixerStrip::hasSection (int s) const
     switch (s)
     {
         case secDyn:     return kind != Kind::fxReturn;
-        case secEq:      return kind == Kind::music;
+        case secEq:      return kind == Kind::music || kind == Kind::bus;
         case secInserts: return true;
-        case secSends:   return kind == Kind::music;
+        case secSends:   return kind == Kind::music || kind == Kind::bus;
         default:         return false;
     }
 }
@@ -245,8 +245,9 @@ MixerStrip::MixerStrip (te::Edit& e, te::AudioTrack* t, Kind k, int i, juce::Col
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
     nameLabel.setColour (juce::Label::textColourId, colour.getPerceivedBrightness() > 0.62f ? juce::Colour (0xff111214) : juce::Colours::white);
-    nameLabel.setTooltip ("Click to show this channel in the FX rack. Double-click to rename.");
-    if (kind == Kind::music)
+    nameLabel.setTooltip (kind == Kind::bus ? "Bus (group channel). Click = FX rack, double-click = rename, right-click = delete."
+                                            : "Click to show this channel in the FX rack. Double-click to rename.");
+    if (kind == Kind::music || kind == Kind::bus)
     {
         nameLabel.setEditable (false, true, false);
         nameLabel.onTextChange = [this] { if (track) track->setName (nameLabel.getText()); };
@@ -266,6 +267,18 @@ MixerStrip::MixerStrip (te::Edit& e, te::AudioTrack* t, Kind k, int i, juce::Col
                 { fx::openWindow (*p); return; }
         };
         addAndMakeVisible (instrumentButton);
+    }
+
+    if (hasOutput())
+    {
+        styleSmall (outButton, colours::bus);
+        outButton.setTooltip ("Output: send this channel to the Master or to a bus (group channel)");
+        outButton.onClick = [this]
+        {
+            if (track != nullptr)
+                routing::showOutputMenu (edit, *track, &outButton, {});
+        };
+        addAndMakeVisible (outButton);
     }
 
     // ---- dynamics ----------------------------------------------------------
@@ -503,6 +516,28 @@ void MixerStrip::showSendMenu (int bus)
     });
 }
 
+void MixerStrip::showBusMenu()
+{
+    if (kind != Kind::bus || track == nullptr) return;
+
+    juce::PopupMenu m;
+    m.addSectionHeader (track->getName());
+    m.addItem (1, "Delete bus (channels go back to Master)");
+
+    te::Edit* e = &edit;
+    const auto id = track->itemID;
+    m.showMenuAsync (juce::PopupMenu::Options(), [e, id] (int r)
+    {
+        if (r != 1) return;
+        for (auto* t : getLdawBuses (*e))
+            if (t->itemID == id)
+            {
+                routing::deleteBus (*e, *t);
+                return;
+            }
+    });
+}
+
 void MixerStrip::setSections (const bool visible[numSections])
 {
     for (int s = 0; s < numSections; ++s)
@@ -518,7 +553,11 @@ void MixerStrip::setSelected (bool s)
 
 void MixerStrip::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isPopupMenu()) return;
+    if (e.mods.isPopupMenu())
+    {
+        if (kind == Kind::bus) showBusMenu();
+        return;
+    }
     if (onSelect) onSelect (*this, nullptr);
 }
 
@@ -536,6 +575,13 @@ void MixerStrip::tick()
             if (dynamic_cast<te::ExternalPlugin*> (&*p) != nullptr && p->isSynth())
                 inst = p->getName();
         instrumentButton.setButtonText (inst);
+    }
+
+    if (hasOutput() && track != nullptr)
+    {
+        auto* dest = routing::outputBus (*track);
+        outButton.setButtonText ("> " + (dest != nullptr ? dest->getName() : juce::String ("Master")));
+        outButton.setToggleState (dest != nullptr, juce::dontSendNotification);
     }
 
     if (auto* dyn = fx::findChannelPlugin (chain(), "dyn")) dynOn.setToggleState (dyn->isEnabled(), juce::dontSendNotification);
@@ -610,12 +656,12 @@ void MixerStrip::paint (juce::Graphics& g)
     g.setColour (sectionBg.darker (0.08f));
     g.fillRect (bottomArea.reduced (2, 1));
 
+    g.setColour (colours::dimText);
+    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
     if (kind == Kind::music)
-    {
-        g.setColour (colours::dimText);
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
         g.drawText (juce::String (index + 1), bottomArea.getX() + 4, bottomArea.getBottom() - 16, 20, 14, juce::Justification::left);
-    }
+    else if (kind == Kind::bus)
+        g.drawText ("BUS", bottomArea.getX() + 4, bottomArea.getBottom() - 16, 30, 14, juce::Justification::left);
 
     if (selected)
     {
@@ -701,6 +747,11 @@ void MixerStrip::resized()
     auto b = bottomArea.reduced (4, 4);
     if (kind == Kind::music)
         instrumentButton.setBounds (b.removeFromTop (20));
+    if (hasOutput())
+    {
+        b.removeFromTop (2);
+        outButton.setBounds (b.removeFromTop (20));
+    }
     b.removeFromTop (2);
     pan.setBounds (b.removeFromTop (44).withSizeKeepingCentre (48, 44));
 
@@ -731,7 +782,7 @@ struct FxRackPanel::Row : public juce::Component
         for (auto* b : { &up, &down, &remove })
             styleSmall (*b, colours::accent);
         power.setTooltip ("On / bypass");
-        name.setTooltip ("Edit this effect below");
+        name.setTooltip ("Show this device below");
         up.setTooltip ("Move up (earlier in the chain)");
         down.setTooltip ("Move down (later in the chain)");
         remove.setTooltip ("Remove");
@@ -784,7 +835,7 @@ FxRackPanel::FxRackPanel()
     styleSmall (addButton, colours::accent);
     styleSmall (windowButton, colours::accent);
     addButton.setTooltip ("Add an effect at the end of this channel's chain");
-    windowButton.setTooltip ("Open the selected effect in its own window");
+    windowButton.setTooltip ("Open the selected device in its own window");
 
     addButton.onClick = [this]
     {
@@ -799,12 +850,8 @@ FxRackPanel::FxRackPanel()
     };
     windowButton.onClick = [this] { if (selected != nullptr) fx::openWindow (*selected); };
 
-    editorTitle.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-    editorTitle.setColour (juce::Label::textColourId, colours::text);
-
     addAndMakeVisible (addButton);
     addAndMakeVisible (windowButton);
-    addAndMakeVisible (editorTitle);
 }
 
 FxRackPanel::~FxRackPanel()
@@ -892,6 +939,7 @@ void FxRackPanel::rebuild()
     signature = makeSignature();
     showEditorFor (selected.get());
     resized();
+    repaint();
 }
 
 void FxRackPanel::rebuildAsync()
@@ -909,17 +957,9 @@ void FxRackPanel::showEditorFor (te::Plugin* p)
     editorView.setViewedComponent (nullptr, false);
     editor.reset();
     editorPlugin = p;
+    windowButton.setEnabled (p != nullptr);
 
-    if (p == nullptr)
-    {
-        editorTitle.setText (list == nullptr ? "Click a channel to see its effects"
-                                             : "No effects yet - click + Add effect", juce::dontSendNotification);
-        windowButton.setEnabled (false);
-        return;
-    }
-
-    editorTitle.setText (fx::displayName (*p), juce::dontSendNotification);
-    windowButton.setEnabled (true);
+    if (p == nullptr) return;
 
     if (dynamic_cast<te::ExternalPlugin*> (p) != nullptr)
     {
@@ -963,6 +1003,15 @@ void FxRackPanel::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (10.0f)));
     g.drawText ("Signal flows top to bottom", getLocalBounds().removeFromTop (28).reduced (8, 0),
                 juce::Justification::centredRight, true);
+
+    if (editor == nullptr)
+    {
+        g.setColour (colours::dimText);
+        g.setFont (juce::Font (juce::FontOptions (12.0f)));
+        g.drawFittedText (list == nullptr ? "Click a channel to see its effects."
+                                          : "No effects yet - click + Add effect.",
+                          editorView.getBounds(), juce::Justification::centredTop, 2);
+    }
 }
 
 void FxRackPanel::resized()
@@ -973,7 +1022,7 @@ void FxRackPanel::resized()
 
     const int rowH = 28;
     const int wantRows = juce::jmax (1, rows.size()) * rowH;
-    const int rowsH = juce::jmin (wantRows, juce::jmax (rowH, (r.getHeight() - 60) / 2));
+    const int rowsH = juce::jmin (wantRows, juce::jmax (rowH, (r.getHeight() - 60) / 3));
     rowsView.setBounds (r.removeFromTop (rowsH));
     const int cw = rowsView.getWidth() - (wantRows > rowsH ? rowsView.getScrollBarThickness() : 0);
     rowsContent.setSize (juce::jmax (100, cw), rows.size() * rowH);
@@ -981,17 +1030,14 @@ void FxRackPanel::resized()
         rows[i]->setBounds (0, i * rowH, rowsContent.getWidth(), rowH);
 
     r.removeFromTop (4);
-    addButton.setBounds (r.removeFromTop (26).removeFromLeft (130));
-    r.removeFromTop (8);
-
-    auto titleRow = r.removeFromTop (24);
-    windowButton.setBounds (titleRow.removeFromRight (100).reduced (0, 1));
-    editorTitle.setBounds (titleRow);
-    r.removeFromTop (2);
+    auto buttons = r.removeFromTop (26);
+    addButton.setBounds (buttons.removeFromLeft (120));
+    windowButton.setBounds (buttons.removeFromRight (100));
+    r.removeFromTop (6);
 
     editorView.setBounds (r);
     if (editor != nullptr)
-        editor->setSize (juce::jmax (200, editorView.getMaximumVisibleWidth()), editor->getHeight());
+        editor->setSize (juce::jmax (300, editorView.getMaximumVisibleWidth()), editor->getHeight());
 }
 
 //==============================================================================
@@ -1162,6 +1208,16 @@ MixerView::MixerView()
     panelButton.onClick = [this] { panelShown = panelButton.getToggleState(); resized(); };
     addAndMakeVisible (panelButton);
 
+    styleSmall (addBusButton, colours::bus);
+    addBusButton.setTooltip ("Add a bus (group channel). Route channels to it with their '>' output button.");
+    addBusButton.onClick = [this]
+    {
+        if (edit == nullptr) return;
+        edit->getUndoManager().beginNewTransaction();
+        routing::createBus (*edit, "Bus " + juce::String (getLdawBuses (*edit).size() + 1));
+    };
+    addAndMakeVisible (addBusButton);
+
     for (auto* b : { &rackTab, &sendsTab })
     {
         styleSmall (*b, colours::accent);
@@ -1206,7 +1262,7 @@ juce::String MixerView::makeTrackSignature()
     juce::String s;
     if (edit != nullptr)
         for (auto* t : te::getAudioTracks (*edit))
-            s << t->itemID.toString() << ",";
+            s << t->itemID.toString() << (isLdawBus (*t) ? "b" : "") << ",";
     return s;
 }
 
@@ -1221,6 +1277,24 @@ void MixerView::selectStrip (MixerStrip& strip, te::Plugin* plugin)
         rack.selectPlugin (plugin);
 
     if (showSends) setTab (false);
+}
+
+void MixerView::showInRack (te::EditItemID trackID)
+{
+    if (! panelShown)
+    {
+        panelShown = true;
+        panelButton.setToggleState (true, juce::dontSendNotification);
+    }
+
+    for (auto* s : strips)
+        if (s->track != nullptr && s->track->itemID == trackID)
+        {
+            selectStrip (*s, nullptr);
+            viewport.setViewPosition (juce::jmax (0, s->getX() - 40), 0);
+            break;
+        }
+    setTab (false);
 }
 
 void MixerView::selectBus (int bus)
@@ -1267,6 +1341,9 @@ void MixerView::rebuild()
         addStrip (new MixerStrip (*edit, t, MixerStrip::Kind::music, i, trackColour (i)));
         ++i;
     }
+
+    for (auto* t : getLdawBuses (*edit))
+        addStrip (new MixerStrip (*edit, t, MixerStrip::Kind::bus, i++, colours::bus));
 
     for (auto* t : getReturnTracks (*edit))
         addStrip (new MixerStrip (*edit, t, MixerStrip::Kind::fxReturn, i++, fx::sendColour (returnBusOf (*t))));
@@ -1315,6 +1392,8 @@ void MixerView::resized()
         b.setBounds (side.removeFromTop (26).reduced (0, 2));
     side.removeFromTop (10);
     panelButton.setBounds (side.removeFromTop (26).reduced (0, 2));
+    side.removeFromTop (10);
+    addBusButton.setBounds (side.removeFromTop (26).reduced (0, 2));
 
     rack.setVisible (panelShown && ! showSends);
     sends.setVisible (panelShown && showSends);
@@ -1322,7 +1401,7 @@ void MixerView::resized()
     sendsTab.setVisible (panelShown);
     if (panelShown)
     {
-        auto panel = r.removeFromRight (juce::jmin (panelWidth, juce::jmax (220, r.getWidth() / 3)));
+        auto panel = r.removeFromRight (juce::jmin (panelWidth, juce::jmax (260, r.getWidth() / 3)));
         auto tabs = panel.removeFromTop (26).reduced (4, 2);
         rackTab.setBounds (tabs.removeFromLeft (tabs.getWidth() / 2).reduced (1, 0));
         sendsTab.setBounds (tabs.reduced (1, 0));
@@ -1349,15 +1428,12 @@ void MixerView::resized()
     for (int s = 0; s < MixerStrip::numSections; ++s)
         sectionButtons[s].setAlpha (userShow[s] && ! vis[s] ? 0.45f : 1.0f);
 
-    int x = 2, numMusic = 0;
+    int x = 2;
+    MixerStrip::Kind lastKind = MixerStrip::Kind::music;
     for (auto* s : strips)
-        if (s->kind == MixerStrip::Kind::music) ++numMusic;
-
-    for (int i = 0; i < strips.size(); ++i)
     {
-        auto* s = strips[i];
-        if (i == numMusic) x += 10;
-        if (s->kind == MixerStrip::Kind::master) x += 10;
+        if (s->kind != lastKind) x += 10;   // gap between groups (tracks | buses | FX returns | master)
+        lastKind = s->kind;
         const int w = s->kind == MixerStrip::Kind::master ? masterWidth : stripWidth;
         s->setSections (vis);
         s->setBounds (x, 0, w, avail);

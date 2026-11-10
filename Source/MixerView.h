@@ -1,6 +1,7 @@
 #pragma once
-// L-DAW 0.5 mixer: dark Reason-style strips + FL-style FX rack + send FX panel
+// L-DAW 0.6 mixer: channel strips, buses, FX rack (device style) + send FX panel
 #include "Effects.h"
+#include "Tools.h"
 #include "EngineUI.h"
 
 //==============================================================================
@@ -22,8 +23,6 @@ private:
     int peakHold[2] { 0, 0 };
 };
 
-//==============================================================================
-// Knob bound to an automatable parameter, or to plain getter/setter functions
 //==============================================================================
 class ParamKnob : public juce::Component
 {
@@ -69,14 +68,14 @@ struct SlotButton : public juce::TextButton
 class MixerStrip : public juce::Component
 {
 public:
-    enum class Kind { music, fxReturn, master };
+    enum class Kind { music, bus, fxReturn, master };
     enum Section { secDyn = 0, secEq, secInserts, secSends, numSections };
 
     MixerStrip (te::Edit&, te::AudioTrack*, Kind, int index, juce::Colour);
 
     static int sectionHeight (int section);
     static constexpr int headerHeight = 24;
-    static constexpr int bottomMinHeight = 214;
+    static constexpr int bottomMinHeight = 236;
 
     void setSections (const bool visible[numSections]);
     void setSelected (bool);
@@ -104,7 +103,7 @@ private:
     juce::Rectangle<int> sectionArea[numSections], headerArea, bottomArea;
 
     juce::Label nameLabel;
-    juce::TextButton instrumentButton, dynOn { "ON" }, eqOn { "ON" }, addFxButton { "+ FX" },
+    juce::TextButton instrumentButton, outButton, dynOn { "ON" }, eqOn { "ON" }, addFxButton { "+ FX" },
                      muteButton { "M" }, soloButton { "S" };
     juce::OwnedArray<ParamKnob> dynKnobs, eqKnobs, sendKnobs;
     juce::OwnedArray<SlotButton> insertButtons;
@@ -114,18 +113,18 @@ private:
     juce::String insertSignature;
 
     bool hasSection (int s) const;
+    bool hasOutput() const { return kind == Kind::music || kind == Kind::bus; }
     te::VolumeAndPanPlugin* volume();
     void rebuildInserts();
     void showInsertMenu (te::Plugin*, juce::Component*);
     void showSendMenu (int bus);
+    void showBusMenu();
     juce::String makeSignature();
     void toggleChannelPlugin (const juce::String& which);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MixerStrip)
 };
 
-//==============================================================================
-// FL Studio-style effect rack for the selected channel
 //==============================================================================
 class FxRackPanel : public juce::Component
 {
@@ -153,18 +152,15 @@ private:
     juce::Viewport rowsView, editorView;
     juce::OwnedArray<Row> rows;
     juce::TextButton addButton { "+ Add effect" }, windowButton { "Open window" };
-    juce::Label editorTitle;
     std::unique_ptr<juce::Component> editor;
     juce::String signature;
 
     void rebuild();
-    void rebuildAsync();   // safe to call from a row button's own onClick
+    void rebuildAsync();
     juce::String makeSignature() const;
     void showEditorFor (te::Plugin*);
 };
 
-//==============================================================================
-// Reason-style send FX panel: what each send does + its return level
 //==============================================================================
 class SendsPanel : public juce::Component
 {
@@ -195,6 +191,7 @@ public:
     void setEdit (te::Edit*);
     void rebuild();
     void tick();
+    void showInRack (te::EditItemID trackID);
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -208,10 +205,10 @@ private:
 
     FxRackPanel rack;
     SendsPanel sends;
-    juce::TextButton rackTab { "FX RACK" }, sendsTab { "SEND FX" }, panelButton { "FX" };
+    juce::TextButton rackTab { "FX RACK" }, sendsTab { "SEND FX" }, panelButton { "FX" }, addBusButton { "+ BUS" };
     bool panelShown = true, showSends = false;
 
-    te::EditItemID rackTrackID;          // invalid = master
+    te::EditItemID rackTrackID;
     bool userShow[MixerStrip::numSections] { true, true, true, true };
     juce::TextButton sectionButtons[MixerStrip::numSections];
 

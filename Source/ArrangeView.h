@@ -1,10 +1,10 @@
 #pragma once
-// L-DAW 0.5
+// L-DAW 0.6
 #include "Theme.h"
 #include "AudioTracks.h"
 
 //==============================================================================
-// Timeline: ruler, loop, MIDI + audio clips, automation lanes, playhead
+// Timeline: ruler + markers, loop, MIDI + audio clips, automation lanes, playhead
 //==============================================================================
 class ArrangeView : public juce::Component,
                     public juce::FileDragAndDropTarget
@@ -24,6 +24,7 @@ public:
 
     void deleteSelectedClip();
     void duplicateSelectedClip();
+    void addMarkerAt (double beat);
 
     te::Edit* edit = nullptr;
     int selectedTrack = 0;
@@ -38,6 +39,7 @@ public:
     std::function<void (int, double)>         onImportAt;       // track index, beat
     std::function<void (juce::Array<juce::File>, int, double)> onFilesDropped;
     std::function<void (te::EditItemID)>      onClipTempo;
+    std::function<void (double startBeat, double endBeat)> onSetLoop;
 
 private:
     struct DragState
@@ -65,6 +67,10 @@ private:
     void   applyDrag();
     void   showClipMenu (te::EditItemID);
     void   select (te::EditItemID);
+
+    int  markerNear (float x) const;
+    void showRulerMenu (double beat);
+    void renameMarker (int index);
 
     juce::AudioThumbnail* getThumb (const juce::File&);
     void drawAudioClip (juce::Graphics&, te::WaveAudioClip&, juce::Rectangle<float>);

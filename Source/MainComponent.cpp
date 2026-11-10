@@ -153,6 +153,9 @@ void TrackRow::refresh()
         if (! volumeSlider.isMouseButtonDown()) volumeSlider.setValue (vp->getVolumeDb(), juce::dontSendNotification);
         if (! panSlider.isMouseButtonDown())    panSlider.setValue (vp->getPan(), juce::dontSendNotification);
     }
+
+    auto out = routing::outputBus (track) != nullptr ? "> " + routing::outputName (track) : juce::String();
+    if (out != outputText) { outputText = out; repaint(); }
 }
 
 void TrackRow::setSelected (bool s) { selected = s; repaint(); }
@@ -173,6 +176,12 @@ void TrackRow::paint (juce::Graphics& g)
     g.setColour (colours::dimText);
     g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
     g.drawText (juce::String (index + 1) + (isAudio ? "  AUDIO" : "  INST"), 12, 4, 80, 12, juce::Justification::left);
+
+    if (outputText.isNotEmpty())
+    {
+        g.setColour (colours::bus);
+        g.drawText (outputText, 74, 4, 70, 12, juce::Justification::left, true);
+    }
 }
 
 void TrackRow::resized()
@@ -280,7 +289,7 @@ void TracksArea::paint (juce::Graphics& g)
     g.fillRect (0, 0, headerWidth, rulerHeight);
     g.setColour (colours::dimText);
     g.setFont (juce::Font (juce::FontOptions (12.0f)));
-    g.drawText ("TRACKS   (drop audio files on the timeline to import)", 14, 0, headerWidth - 20, rulerHeight,
+    g.drawText ("TRACKS   (drop audio files on the timeline  |  double-click the ruler = marker)", 14, 0, headerWidth - 20, rulerHeight,
                 juce::Justification::centredLeft);
 }
 
@@ -316,8 +325,8 @@ MainComponent::MainComponent()
     addAndMakeVisible (titleLabel);
 
     for (auto* b : { &playButton, &stopButton, &recordButton, &addTrackButton, &importButton, &demoButton, &audioButton,
-                     &pluginsButton, &newButton, &openButton, &saveButton, &undoButton, &redoButton,
-                     &mixerButton, &fullMixerButton })
+                     &pluginsButton, &newButton, &openButton, &saveButton, &exportButton, &undoButton, &redoButton,
+                     &mixerButton, &fullMixerButton, &inspectorButton })
     {
         b->setColour (juce::TextButton::buttonColourId, colours::panelLight);
         b->setWantsKeyboardFocus (false);
@@ -328,17 +337,22 @@ MainComponent::MainComponent()
     recordButton.setColour (juce::TextButton::buttonOnColourId, colours::record);
     mixerButton.setColour (juce::TextButton::buttonOnColourId, colours::accent);
     fullMixerButton.setColour (juce::TextButton::buttonOnColourId, colours::accent);
+    inspectorButton.setColour (juce::TextButton::buttonOnColourId, colours::accent);
     mixerButton.setTooltip ("Show the mixer below the tracks (F3). Drag the bar above it to resize.");
     fullMixerButton.setTooltip ("Mixer in the whole window (F9)");
+    inspectorButton.setTooltip ("Show / hide the inspector for the selected track and clip (F4)");
     importButton.setTooltip ("Import audio files onto the selected audio track (or a new one)");
+    exportButton.setTooltip ("Export the mix to a WAV file");
 
     styleToggle (loopButton,  colours::accent);
     styleToggle (clickButton, colours::accent);
+    styleToggle (countInButton, colours::accent);
     styleToggle (autoReadButton,  colours::play);
     styleToggle (autoWriteButton, colours::record);
+    countInButton.setTooltip ("One bar count-in before recording (turn on Click to hear it)");
     autoReadButton.setTooltip ("Play back automation");
     autoWriteButton.setTooltip ("Record automation: press Play and move any knob/fader (plug-in or mixer)");
-    for (auto* b : { &loopButton, &clickButton, &autoReadButton, &autoWriteButton })
+    for (auto* b : { &loopButton, &clickButton, &countInButton, &autoReadButton, &autoWriteButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -349,6 +363,7 @@ MainComponent::MainComponent()
     recordButton.onClick    = [this] { toggleRecord(); };
     loopButton.onClick      = [this] { if (edit) { edit->getTransport().looping = loopButton.getToggleState(); updateLoopRange(); } };
     clickButton.onClick     = [this] { if (edit) edit->clickTrackEnabled = clickButton.getToggleState(); };
+    countInButton.onClick   = [this] { if (edit) tools::setCountIn (*edit, countInButton.getToggleState()); };
     autoReadButton.onClick  = [this] { if (edit) edit->getAutomationRecordManager().setReadingAutomation (autoReadButton.getToggleState()); };
     autoWriteButton.onClick = [this]
     {
@@ -365,10 +380,19 @@ MainComponent::MainComponent()
     newButton.onClick       = [this] { createNewEdit(); };
     openButton.onClick      = [this] { openProject(); };
     saveButton.onClick      = [this] { saveProject(); };
+    exportButton.onClick    = [this]
+    {
+        if (edit == nullptr) return;
+        tools::showExportDialog (*edit, [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::String& s)
+        {
+            if (safe != nullptr) { safe->setStatus (s); safe->routeInputs(); }
+        });
+    };
     undoButton.onClick      = [this] { if (edit) { edit->getUndoManager().undo(); rebuildTracks(); } };
     redoButton.onClick      = [this] { if (edit) { edit->getUndoManager().redo(); rebuildTracks(); } };
     mixerButton.onClick     = [this] { setMixerDocked (! mixerDocked); };
     fullMixerButton.onClick = [this] { setMixerFull (! mixerFull); };
+    inspectorButton.onClick = [this] { inspectorShown = ! inspectorShown; resized(); };
 
     tempoSlider.setSliderStyle (juce::Slider::IncDecButtons);
     tempoSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 56, 26);
@@ -386,7 +410,12 @@ MainComponent::MainComponent()
     for (int bars : { 1, 2, 4, 8, 16, 32 })
         loopLengthBox.addItem (juce::String (bars) + (bars == 1 ? " bar" : " bars"), bars);
     loopLengthBox.setSelectedId (4, juce::dontSendNotification);
-    loopLengthBox.onChange = [this] { updateLoopRange(); };
+    loopLengthBox.onChange = [this]
+    {
+        loopStartBeat = 0.0;
+        loopEndBeat = juce::jmax (1, loopLengthBox.getSelectedId()) * 4.0;
+        updateLoopRange();
+    };
     addAndMakeVisible (loopLengthBox);
 
     for (int bars : { 8, 16, 32, 64 })
@@ -413,24 +442,34 @@ MainComponent::MainComponent()
 
     auto& arr = tracksArea.arrange;
     arr.onLaneClicked  = [this] (int i) { editorPanel.wantsKeys = false; editorPanel.repaint(); selectTrack (i); };
-    arr.onClipsChanged = [this] { tracksArea.arrange.repaint(); };
+    arr.onClipsChanged = [this] { tracksArea.arrange.repaint(); updateInspector(); };
     arr.onOpenEditor   = [this] (te::EditItemID id, int mode) { openEditor (id, mode); };
     arr.onClipSelected = [this] (te::EditItemID id)
     {
         if (editorOpen && id.isValid() && findMidiClip (edit.get(), id) != nullptr)
             openEditor (id, -1);
+        updateInspector();
     };
     arr.onImportAt     = [this] (int trackIndex, double beat) { importAudio (trackIndex, beat); };
     arr.onFilesDropped = [this] (juce::Array<juce::File> files, int trackIndex, double beat) { importFiles (files, trackIndex, beat); };
     arr.onClipTempo    = [this] (te::EditItemID id) { showClipTempoDialog (id); };
+    arr.onSetLoop      = [this] (double s, double e) { setLoopBeats (s, e); };
+
+    inspector.onOpenInstrument = [this] (te::AudioTrack& t) { openInstrumentWindow (t); };
+    inspector.onShowInMixer    = [this] (te::AudioTrack& t) { setMixerDocked (true); mixerView.showInRack (t.itemID); };
+    inspector.onEditClip       = [this] (te::EditItemID id) { openEditor (id, 0); };
+    inspector.onClipTempo      = [this] (te::EditItemID id) { showClipTempoDialog (id); };
+    addAndMakeVisible (inspector);
 
     editorPanel.onClose = [this] { closeEditor(); };
     addChildComponent (editorPanel);
 
-    editorDivider.onDrag = [this] (int dy) { editorHeight -= dy; resized(); };
-    mixerDivider.onDrag  = [this] (int dy) { mixerHeight  -= dy; resized(); };
+    editorDivider.onDrag    = [this] (int dy) { editorHeight -= dy; resized(); };
+    mixerDivider.onDrag     = [this] (int dy) { mixerHeight  -= dy; resized(); };
+    inspectorDivider.onDrag = [this] (int dx) { inspectorWidth -= dx; resized(); };
     addChildComponent (editorDivider);
     addChildComponent (mixerDivider);
+    addChildComponent (inspectorDivider);
 
     viewport.setViewedComponent (&tracksArea, false);
     viewport.setScrollBarsShown (true, false);
@@ -439,13 +478,14 @@ MainComponent::MainComponent()
 
     createNewEdit();
 
-    setSize (1400, 860);
+    setSize (1440, 880);
     startTimerHz (30);
 }
 
 MainComponent::~MainComponent()
 {
     stopTimer();
+    inspector.setTarget (nullptr, nullptr, 0, {});
     mixerView.setEdit (nullptr);
     tracksArea.rows.clear();
     tracksArea.autoHeaders.clear();
@@ -482,11 +522,12 @@ void MainComponent::createNewEdit()
     currentFile = file;
     setEdit (std::move (newEdit));
     autoLoadMyInstruments();
-    setStatus ("New project. Arm a track (R) and play. Space = play/stop, F3 = mixer, A = automation lanes.");
+    setStatus ("New project. Space = play/stop, F3 = mixer, F4 = inspector, M = marker at playhead.");
 }
 
 void MainComponent::setEdit (std::unique_ptr<te::Edit> newEdit)
 {
+    inspector.setTarget (nullptr, nullptr, 0, {});
     mixerView.setEdit (nullptr);
     tracksArea.rows.clear();
     tracksArea.autoHeaders.clear();
@@ -518,8 +559,17 @@ void MainComponent::setEdit (std::unique_ptr<te::Edit> newEdit)
     if (auto tempo = edit->tempoSequence.getTempo (0))
         tempoSlider.setValue (tempo->getBpm(), juce::dontSendNotification);
 
+    {
+        auto lr = edit->getTransport().getLoopRange();
+        loopStartBeat = beatOf (*edit, lr.getStart());
+        loopEndBeat   = beatOf (*edit, lr.getEnd());
+        if (loopEndBeat <= loopStartBeat + 0.5) { loopStartBeat = 0.0; loopEndBeat = 16.0; }
+    }
+
     loopButton.setToggleState (edit->getTransport().looping.get(), juce::dontSendNotification);
     clickButton.setToggleState (edit->clickTrackEnabled.get(), juce::dontSendNotification);
+    countInButton.setToggleState (tools::getCountIn (*edit), juce::dontSendNotification);
+    tools::setCountIn (*edit, tools::getCountIn (*edit));
     autoReadButton.setToggleState (edit->getAutomationRecordManager().isReadingAutomation(), juce::dontSendNotification);
     autoWriteButton.setToggleState (edit->getAutomationRecordManager().isWritingAutomation(), juce::dontSendNotification);
 
@@ -529,6 +579,7 @@ void MainComponent::setEdit (std::unique_ptr<te::Edit> newEdit)
     rebuildTracks();
     routeInputs();
     mixerView.setEdit (edit.get());
+    updateInspector();
 }
 
 void MainComponent::saveProject()
@@ -683,6 +734,18 @@ void MainComponent::rebuildTracks()
     laneSignature = makeLaneSignature();
     resized();
     tracksArea.resized();
+    updateInspector();
+}
+
+void MainComponent::updateInspector()
+{
+    if (edit == nullptr) { inspector.setTarget (nullptr, nullptr, 0, {}); return; }
+
+    auto clipID = tracksArea.arrange.selectedClip;
+    if (clipID.isValid() && te::findClipForID (*edit, clipID) == nullptr)
+        clipID = {};
+
+    inspector.setTarget (edit.get(), getTrack (selectedTrack), selectedTrack, clipID);
 }
 
 void MainComponent::selectTrack (int index)
@@ -700,6 +763,7 @@ void MainComponent::selectTrack (int index)
     tracksArea.arrange.selectedTrack = selectedTrack;
     tracksArea.arrange.repaint();
     routeInputs();
+    updateInspector();
 }
 
 void MainComponent::routeInputs()
@@ -807,10 +871,19 @@ void MainComponent::showAddTrackMenu()
     juce::PopupMenu m;
     m.addItem (1, "Instrument track (MIDI)");
     m.addItem (2, "Audio track (record / import audio)");
+    m.addItem (3, "Bus (group channel in the mixer)");
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addTrackButton),
                      [safe = juce::Component::SafePointer<MainComponent> (this)] (int r)
     {
-        if (safe == nullptr || r == 0) return;
+        if (safe == nullptr || r == 0 || safe->edit == nullptr) return;
+        if (r == 3)
+        {
+            safe->edit->getUndoManager().beginNewTransaction();
+            routing::createBus (*safe->edit, "Bus " + juce::String (getLdawBuses (*safe->edit).size() + 1));
+            safe->setMixerDocked (true);
+            safe->setStatus ("Bus added. Route channels to it with their '>' output button in the mixer (or in the inspector).");
+            return;
+        }
         safe->addTrack (r == 2);
     });
 }
@@ -1156,10 +1229,19 @@ void MainComponent::showClipTempoDialog (te::EditItemID id)
 void MainComponent::updateLoopRange()
 {
     if (edit == nullptr) return;
-
-    const int bars = juce::jmax (1, loopLengthBox.getSelectedId());
-    edit->getTransport().setLoopRange (te::TimeRange (timeOf (*edit, 0.0), timeOf (*edit, bars * 4.0)));
+    edit->getTransport().setLoopRange (te::TimeRange (timeOf (*edit, loopStartBeat), timeOf (*edit, loopEndBeat)));
     tracksArea.arrange.repaint();
+}
+
+void MainComponent::setLoopBeats (double startBeat, double endBeat)
+{
+    if (edit == nullptr) return;
+    loopStartBeat = juce::jmax (0.0, startBeat);
+    loopEndBeat   = juce::jmax (loopStartBeat + 1.0, endBeat);
+    edit->getTransport().looping = true;
+    loopButton.setToggleState (true, juce::dontSendNotification);
+    updateLoopRange();
+    setStatus ("Loop: bar " + beatToBarText (loopStartBeat) + " to " + beatToBarText (loopEndBeat));
 }
 
 void MainComponent::togglePlay()
@@ -1194,7 +1276,7 @@ void MainComponent::toggleRecord()
         tc.stop (false, false);
         juce::Timer::callAfterDelay (400, [safe = juce::Component::SafePointer<MainComponent> (this)]
         {
-            if (safe != nullptr) safe->tracksArea.arrange.repaint();
+            if (safe != nullptr) { safe->tracksArea.arrange.repaint(); safe->updateInspector(); }
         });
         return;
     }
@@ -1284,15 +1366,12 @@ void MainComponent::insertDemoPattern (int type)
         }
     }
 
-    const int neededBars = (int) ((startBeat + 16.0) / 4.0);
-    if (neededBars > loopLengthBox.getSelectedId())
-    {
-        for (int bars : { 1, 2, 4, 8, 16, 32 })
-            if (bars >= neededBars) { loopLengthBox.setSelectedId (bars); break; }
-    }
+    if (startBeat + 16.0 > loopEndBeat)
+        setLoopBeats (0.0, startBeat + 16.0);
 
     tracksArea.arrange.selectedClip = clip->itemID;
     openEditor (clip->itemID, type == 3 ? 2 : 1);
+    updateInspector();
     setStatus ("Inserted demo clip on " + track->getName() + ". Press Play (or Space).");
 }
 
@@ -1394,12 +1473,19 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
         return true;
 
     const auto cmd = juce::ModifierKeys::commandModifier;
+    const auto ch = juce::CharacterFunctions::toLowerCase (k.getTextCharacter());
 
     if (k == juce::KeyPress::spaceKey)               { togglePlay(); return true; }
     if (k == juce::KeyPress::returnKey)              { stopOrReturnToZero(); return true; }
     if (k == juce::KeyPress::F3Key)                  { setMixerDocked (! mixerDocked); return true; }
+    if (k == juce::KeyPress::F4Key)                  { inspectorShown = ! inspectorShown; resized(); return true; }
     if (k == juce::KeyPress::F9Key)                  { setMixerFull (! mixerFull); return true; }
-    if (k.getTextCharacter() == 'r' || k.getTextCharacter() == 'R') { toggleRecord(); return true; }
+    if (! k.getModifiers().isCommandDown() && ch == 'r') { toggleRecord(); return true; }
+    if (! k.getModifiers().isCommandDown() && ch == 'm' && edit != nullptr)
+    {
+        tracksArea.arrange.addMarkerAt (beatOf (*edit, edit->getTransport().getPosition()));
+        return true;
+    }
     if (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) { tracksArea.arrange.deleteSelectedClip(); return true; }
     if (k == juce::KeyPress ('d', cmd, 0)) { tracksArea.arrange.duplicateSelectedClip(); return true; }
     if (k == juce::KeyPress ('z', cmd, 0)) { undoButton.triggerClick(); return true; }
@@ -1416,8 +1502,8 @@ void MainComponent::timerCallback()
 
     const double beats = beatOf (*edit, tc.getPosition());
     const int bar  = (int) std::floor (beats / 4.0) + 1;
-    const int beat = (int) std::floor (std::fmod (beats, 4.0)) + 1;
-    const int tick = (int) std::floor (std::fmod (beats, 1.0) * 100.0);
+    const int beat = (int) std::floor (std::fmod (juce::jmax (0.0, beats), 4.0)) + 1;
+    const int tick = (int) std::floor (std::fmod (juce::jmax (0.0, beats), 1.0) * 100.0);
     positionLabel.setText (juce::String (bar).paddedLeft ('0', 3) + " . " + juce::String (beat)
                              + " . " + juce::String (tick).paddedLeft ('0', 2),
                            juce::dontSendNotification);
@@ -1432,7 +1518,10 @@ void MainComponent::timerCallback()
         tracksArea.arrange.repaint();
         for (auto* h : tracksArea.autoHeaders) h->tick();
         if (tickCount % 10 == 0)
+        {
             for (auto* r : tracksArea.rows) r->refresh();
+            if (inspectorShown) inspector.tick();
+        }
     }
 
     if ((mixerDocked || mixerFull) && tickCount % 2 == 0)
@@ -1464,47 +1553,49 @@ void MainComponent::resized()
     auto top = r.removeFromTop (96).reduced (10, 8);
 
     auto row1 = top.removeFromTop (38);
-    titleLabel.setBounds (row1.removeFromLeft (84));
+    titleLabel.setBounds (row1.removeFromLeft (80));
     for (auto* b : { &playButton, &stopButton, &recordButton, &loopButton, &clickButton })
-        b->setBounds (row1.removeFromLeft (58).reduced (2));
+        b->setBounds (row1.removeFromLeft (56).reduced (2));
+    countInButton.setBounds (row1.removeFromLeft (74).reduced (2));
     row1.removeFromLeft (8);
-    positionLabel.setBounds (row1.removeFromLeft (164).reduced (2));
+    positionLabel.setBounds (row1.removeFromLeft (160).reduced (2));
+    row1.removeFromLeft (6);
+    tempoLabel.setBounds (row1.removeFromLeft (36));
+    tempoSlider.setBounds (row1.removeFromLeft (124).reduced (2, 4));
+    loopLabel.setBounds (row1.removeFromLeft (38));
+    loopLengthBox.setBounds (row1.removeFromLeft (84).reduced (2, 6));
+    zoomLabel.setBounds (row1.removeFromLeft (38));
+    zoomBox.setBounds (row1.removeFromLeft (84).reduced (2, 6));
     row1.removeFromLeft (8);
-    tempoLabel.setBounds (row1.removeFromLeft (38));
-    tempoSlider.setBounds (row1.removeFromLeft (126).reduced (2, 4));
-    loopLabel.setBounds (row1.removeFromLeft (40));
-    loopLengthBox.setBounds (row1.removeFromLeft (86).reduced (2, 6));
-    zoomLabel.setBounds (row1.removeFromLeft (40));
-    zoomBox.setBounds (row1.removeFromLeft (86).reduced (2, 6));
-    row1.removeFromLeft (10);
-    autoReadButton.setBounds (row1.removeFromLeft (70).reduced (2));
-    autoWriteButton.setBounds (row1.removeFromLeft (74).reduced (2));
+    autoReadButton.setBounds (row1.removeFromLeft (68).reduced (2));
+    autoWriteButton.setBounds (row1.removeFromLeft (72).reduced (2));
 
     top.removeFromTop (6);
 
     auto row2 = top.removeFromTop (32);
-    for (auto* b : { &newButton, &openButton, &saveButton, &undoButton, &redoButton })
+    for (auto* b : { &newButton, &openButton, &saveButton, &exportButton, &undoButton, &redoButton })
         b->setBounds (row2.removeFromLeft (56).reduced (2));
     row2.removeFromLeft (8);
     for (auto* b : { &addTrackButton, &importButton, &demoButton, &pluginsButton, &audioButton })
-        b->setBounds (row2.removeFromLeft (98).reduced (2));
+        b->setBounds (row2.removeFromLeft (96).reduced (2));
     row2.removeFromLeft (8);
-    mixerButton.setBounds (row2.removeFromLeft (70).reduced (2));
-    fullMixerButton.setBounds (row2.removeFromLeft (86).reduced (2));
+    mixerButton.setBounds (row2.removeFromLeft (64).reduced (2));
+    fullMixerButton.setBounds (row2.removeFromLeft (82).reduced (2));
+    inspectorButton.setBounds (row2.removeFromLeft (80).reduced (2));
     row2.removeFromLeft (8);
     statusLabel.setBounds (row2);
 
     mixerButton.setToggleState (mixerDocked && ! mixerFull, juce::dontSendNotification);
     fullMixerButton.setToggleState (mixerFull, juce::dontSendNotification);
+    inspectorButton.setToggleState (inspectorShown, juce::dontSendNotification);
 
     if (mixerFull)
     {
         mixerView.setVisible (true);
         mixerView.setBounds (r);
-        viewport.setVisible (false);
-        editorPanel.setVisible (false);
-        editorDivider.setVisible (false);
-        mixerDivider.setVisible (false);
+        for (juce::Component* c : { (juce::Component*) &viewport, (juce::Component*) &editorPanel, (juce::Component*) &editorDivider,
+                                    (juce::Component*) &mixerDivider, (juce::Component*) &inspector, (juce::Component*) &inspectorDivider })
+            c->setVisible (false);
         return;
     }
 
@@ -1514,7 +1605,7 @@ void MainComponent::resized()
     mixerDivider.setVisible (mixerDocked);
     if (mixerDocked)
     {
-        mixerHeight = juce::jlimit (240, juce::jmax (240, r.getHeight() - 160), mixerHeight);
+        mixerHeight = juce::jlimit (260, juce::jmax (260, r.getHeight() - 160), mixerHeight);
         mixerView.setBounds (r.removeFromBottom (mixerHeight));
         mixerDivider.setBounds (r.removeFromBottom (7));
     }
@@ -1526,6 +1617,15 @@ void MainComponent::resized()
         editorHeight = juce::jlimit (180, juce::jmax (180, r.getHeight() - 120), editorHeight);
         editorPanel.setBounds (r.removeFromBottom (editorHeight));
         editorDivider.setBounds (r.removeFromBottom (7));
+    }
+
+    inspector.setVisible (inspectorShown);
+    inspectorDivider.setVisible (inspectorShown);
+    if (inspectorShown)
+    {
+        inspectorWidth = juce::jlimit (200, 420, inspectorWidth);
+        inspector.setBounds (r.removeFromRight (inspectorWidth));
+        inspectorDivider.setBounds (r.removeFromRight (6));
     }
 
     viewport.setBounds (r);

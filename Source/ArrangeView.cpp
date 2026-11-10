@@ -63,6 +63,99 @@ juce::AudioThumbnail* ArrangeView::getThumb (const juce::File& f)
 }
 
 //==============================================================================
+// Markers
+//==============================================================================
+int ArrangeView::markerNear (float x) const
+{
+    if (edit == nullptr) return -1;
+    auto markers = getMarkers (*edit);
+    for (int i = 0; i < (int) markers.size(); ++i)
+    {
+        const float mx = beatsToX (markers[(size_t) i].beat);
+        if (x >= mx - 4.0f && x <= mx + 70.0f)
+            return i;
+    }
+    return -1;
+}
+
+void ArrangeView::addMarkerAt (double beat)
+{
+    if (edit == nullptr) return;
+    auto markers = getMarkers (*edit);
+    beat = std::round (beat);
+    for (auto& m : markers)
+        if (std::abs (m.beat - beat) < 0.01) return;
+
+    edit->getUndoManager().beginNewTransaction();
+    markers.push_back ({ beat, "Marker " + juce::String ((int) markers.size() + 1) });
+    setMarkers (*edit, markers);
+    repaint();
+}
+
+void ArrangeView::renameMarker (int index)
+{
+    auto markers = getMarkers (*edit);
+    if (! juce::isPositiveAndBelow (index, (int) markers.size())) return;
+
+    auto* aw = new juce::AlertWindow ("Rename marker", {}, juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", markers[(size_t) index].name, "Name:");
+    aw->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    aw->enterModalState (true, juce::ModalCallbackFunction::create ([safe, aw, index] (int r)
+    {
+        if (safe == nullptr || r != 1 || safe->edit == nullptr) return;
+        auto ms = getMarkers (*safe->edit);
+        if (! juce::isPositiveAndBelow (index, (int) ms.size())) return;
+        safe->edit->getUndoManager().beginNewTransaction();
+        ms[(size_t) index].name = aw->getTextEditorContents ("name").trim();
+        setMarkers (*safe->edit, ms);
+        safe->repaint();
+    }), true);
+}
+
+void ArrangeView::showRulerMenu (double beat)
+{
+    const int near = markerNear (beatsToX (beat));
+    auto markers = getMarkers (*edit);
+
+    juce::PopupMenu m;
+    m.addItem (1, "Add marker at bar " + beatToBarText (std::round (beat)));
+    if (near >= 0)
+    {
+        m.addSeparator();
+        m.addSectionHeader (markers[(size_t) near].name);
+        m.addItem (2, "Rename marker...");
+        m.addItem (3, "Delete marker");
+        m.addItem (4, "Loop from this marker to the next");
+    }
+
+    juce::Component::SafePointer<ArrangeView> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options(), [safe, beat, near] (int r)
+    {
+        if (safe == nullptr || safe->edit == nullptr || r == 0) return;
+        auto ms = getMarkers (*safe->edit);
+
+        if (r == 1) safe->addMarkerAt (beat);
+        else if (r == 2) safe->renameMarker (near);
+        else if (r == 3 && juce::isPositiveAndBelow (near, (int) ms.size()))
+        {
+            safe->edit->getUndoManager().beginNewTransaction();
+            ms.erase (ms.begin() + near);
+            setMarkers (*safe->edit, ms);
+        }
+        else if (r == 4 && juce::isPositiveAndBelow (near, (int) ms.size()))
+        {
+            const double start = ms[(size_t) near].beat;
+            const double end = near + 1 < (int) ms.size() ? ms[(size_t) near + 1].beat : start + 16.0;
+            if (safe->onSetLoop) safe->onSetLoop (start, juce::jmax (start + 1.0, end));
+        }
+        safe->repaint();
+    });
+}
+
+//==============================================================================
 float ArrangeView::valueToY (const Lane& l, float v) const
 {
     auto range = l.param->getValueRange();
@@ -222,6 +315,23 @@ void ArrangeView::paint (juce::Graphics& g)
         g.drawText (juce::String (bar + 1), (int) x + 4, 2, 40, 16, juce::Justification::left);
     }
 
+    // markers: flag in the ruler + faint line through the tracks
+    for (auto& m : getMarkers (*edit))
+    {
+        const float x = beatsToX (m.beat);
+        if (x > w) continue;
+        g.setColour (colours::marker.withAlpha (0.25f));
+        g.drawVerticalLine ((int) x, (float) rulerHeight, h);
+
+        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+        const float tw = juce::jlimit (40.0f, 120.0f, 7.0f * (float) m.name.length() + 10.0f);
+        juce::Rectangle<float> flag (x, 1.0f, tw, (float) rulerHeight - 7.0f);
+        g.setColour (colours::marker);
+        g.fillRoundedRectangle (flag, 2.0f);
+        g.setColour (juce::Colour (0xff10202a));
+        g.drawText (m.name, flag.reduced (4.0f, 0.0f), juce::Justification::centredLeft, true);
+    }
+
     for (auto& l : lanes)
     {
         if (l.isAuto()) continue;
@@ -334,6 +444,12 @@ te::Clip* ArrangeView::clipAt (juce::Point<int> p, int& trackIndex) const
 
 void ArrangeView::mouseMove (const juce::MouseEvent& e)
 {
+    if (e.y < rulerHeight)
+    {
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        return;
+    }
+
     const int li = laneIndexAt (e.y);
     if (li >= 0 && lanes[(size_t) li].isAuto())
     {
@@ -364,7 +480,20 @@ void ArrangeView::mouseDown (const juce::MouseEvent& e)
     if (e.y < rulerHeight)
     {
         double beat = xToBeats ((float) e.x);
-        if (! e.mods.isShiftDown()) beat = std::floor (beat + 0.5);
+
+        if (e.mods.isPopupMenu())
+        {
+            showRulerMenu (beat);
+            return;
+        }
+
+        // click on a marker flag jumps exactly to the marker
+        const int m = markerNear ((float) e.x);
+        if (m >= 0 && e.y < rulerHeight - 5)
+            beat = getMarkers (*edit)[(size_t) m].beat;
+        else if (! e.mods.isShiftDown())
+            beat = std::floor (beat + 0.5);
+
         edit->getTransport().setPosition (timeOf (*edit, beat));
         repaint();
         return;
@@ -480,7 +609,15 @@ void ArrangeView::mouseUp (const juce::MouseEvent&)
 
 void ArrangeView::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (edit == nullptr || e.y < rulerHeight) return;
+    if (edit == nullptr) return;
+
+    if (e.y < rulerHeight)
+    {
+        const int m = markerNear ((float) e.x);
+        if (m >= 0) renameMarker (m);
+        else        addMarkerAt (xToBeats ((float) e.x));
+        return;
+    }
 
     const int li = laneIndexAt (e.y);
     if (li < 0 || lanes[(size_t) li].isAuto()) return;
@@ -625,16 +762,21 @@ void ArrangeView::showClipMenu (te::EditItemID id)
     m.addSeparator();
     m.addItem (3, "Duplicate   (Ctrl+D)");
     m.addItem (4, "Delete      (Del)");
+    m.addItem (6, "Loop this clip");
 
     m.showMenuAsync (juce::PopupMenu::Options(),
                      [safe = juce::Component::SafePointer<ArrangeView> (this), id] (int r)
     {
-        if (safe == nullptr) return;
+        if (safe == nullptr || safe->edit == nullptr) return;
         safe->selectedClip = id;
         if (r == 1 && safe->onOpenEditor) safe->onOpenEditor (id, 1);
         if (r == 2 && safe->onOpenEditor) safe->onOpenEditor (id, 2);
         if (r == 3) safe->duplicateSelectedClip();
         if (r == 4) safe->deleteSelectedClip();
         if (r == 5 && safe->onClipTempo) safe->onClipTempo (id);
+        if (r == 6 && safe->onSetLoop)
+            if (auto* c = te::findClipForID (*safe->edit, id))
+                safe->onSetLoop (beatOf (*safe->edit, c->getPosition().getStart()),
+                                 beatOf (*safe->edit, c->getPosition().getEnd()));
     });
 }

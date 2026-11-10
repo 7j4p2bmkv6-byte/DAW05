@@ -1,10 +1,10 @@
 #pragma once
-// L-DAW 0.5
+// L-DAW 0.6
 #include <JuceHeader.h>
 #include <optional>
 #include <type_traits>
 
-#define LDAW_VERSION_STRING "0.5.0"
+#define LDAW_VERSION_STRING "0.6.0"
 
 namespace te = tracktion;
 
@@ -30,6 +30,8 @@ namespace ldaw
         const juce::Colour play        { 0xff3fbf6a };
         const juce::Colour send        { 0xff36b3a8 };
         const juce::Colour selection   { 0xfff2d16b };
+        const juce::Colour bus         { 0xff8a7fd6 };
+        const juce::Colour marker      { 0xff5fc8ff };
     }
 
     inline juce::Colour trackColour (int index)
@@ -40,29 +42,43 @@ namespace ldaw
     }
 
     //--------------------------------------------------------------------------
-    // Track / clip properties stored in the edit
+    // Track / clip / edit properties stored in the project
     //--------------------------------------------------------------------------
     inline const juce::Identifier returnBusProp { "ldawReturnBus" };
+    inline const juce::Identifier busProp       { "ldawBus" };
     inline const juce::Identifier kindProp      { "ldawKind" };
     inline const juce::Identifier inputProp     { "ldawInput" };
     inline const juce::Identifier autoLanesProp { "ldawAutoLanes" };
     inline const juce::Identifier sourceBpmProp { "ldawSourceBpm" };
     inline const juce::Identifier channelProp   { "ldawChannel" };
+    inline const juce::Identifier markersProp   { "ldawMarkers" };
+    inline const juce::Identifier countInProp   { "ldawCountIn" };
     constexpr int numSendBuses = 4;
 
     inline bool isReturnTrack (const te::Track& t)  { return t.state.hasProperty (returnBusProp); }
     inline int  returnBusOf (const te::Track& t)     { return (int) t.state.getProperty (returnBusProp, -1); }
+    inline bool isLdawBus (const te::Track& t)     { return t.state.hasProperty (busProp); }
 
     // "Audio track" in L-DAW terms (record/import audio, no instrument).
-    // The AudioTrack overload is an exact match, so it wins over tracktion::isAudioTrack.
     inline bool isAudioTrack (const te::Track& t)      { return t.state.getProperty (kindProp).toString() == "audio"; }
     inline bool isAudioTrack (const te::AudioTrack& t) { return t.state.getProperty (kindProp).toString() == "audio"; }
 
+    // Tracks shown in the arrange view (instrument + audio tracks)
     inline juce::Array<te::AudioTrack*> getMusicTracks (te::Edit& e)
     {
         juce::Array<te::AudioTrack*> out;
         for (auto* t : te::getAudioTracks (e))
-            if (! isReturnTrack (*t))
+            if (! isReturnTrack (*t) && ! isLdawBus (*t))
+                out.add (t);
+        return out;
+    }
+
+    // Group / bus channels (mixer only)
+    inline juce::Array<te::AudioTrack*> getLdawBuses (te::Edit& e)
+    {
+        juce::Array<te::AudioTrack*> out;
+        for (auto* t : te::getAudioTracks (e))
+            if (isLdawBus (*t))
                 out.add (t);
         return out;
     }
@@ -142,6 +158,13 @@ namespace ldaw
         return 120.0;
     }
 
+    inline juce::String beatToBarText (double beat)
+    {
+        const int bar = (int) std::floor (beat / 4.0) + 1;
+        const int b   = (int) std::floor (std::fmod (juce::jmax (0.0, beat), 4.0)) + 1;
+        return juce::String (bar) + "." + juce::String (b);
+    }
+
     inline te::MidiClip* findMidiClip (te::Edit* e, te::EditItemID id)
     {
         if (e == nullptr || ! id.isValid()) return nullptr;
@@ -169,6 +192,30 @@ namespace ldaw
 
     inline std::vector<ClipNote>& noteClipboard()  { static std::vector<ClipNote> v; return v; }
     inline double& noteClipboardSpan()            { static double s = 0.0; return s; }
+
+    //--------------------------------------------------------------------------
+    // Markers: stored in the edit as "beat|name;beat|name"
+    //--------------------------------------------------------------------------
+    struct Marker { double beat; juce::String name; };
+
+    inline std::vector<Marker> getMarkers (te::Edit& e)
+    {
+        std::vector<Marker> out;
+        for (auto& item : juce::StringArray::fromTokens (e.state.getProperty (markersProp).toString(), ";", ""))
+            if (item.contains ("|"))
+                out.push_back ({ item.upToFirstOccurrenceOf ("|", false, false).getDoubleValue(),
+                                 item.fromFirstOccurrenceOf ("|", false, false) });
+        std::sort (out.begin(), out.end(), [] (const Marker& a, const Marker& b) { return a.beat < b.beat; });
+        return out;
+    }
+
+    inline void setMarkers (te::Edit& e, const std::vector<Marker>& markers)
+    {
+        juce::StringArray items;
+        for (auto& m : markers)
+            items.add (juce::String (m.beat, 3) + "|" + m.name.removeCharacters (";|"));
+        e.state.setProperty (markersProp, items.joinIntoString (";"), &e.getUndoManager());
+    }
 
     //--------------------------------------------------------------------------
     // Automation lanes: stored per track as "pluginID|paramID;pluginID|paramID"

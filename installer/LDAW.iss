@@ -1,5 +1,5 @@
 #define AppName "L-DAW"
-#define AppVersion "0.5.0"
+#define AppVersion "0.6.0"
 #define AppExe "L-DAW.exe"
 
 [Setup]
